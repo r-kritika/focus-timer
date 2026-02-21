@@ -26,19 +26,8 @@ const currentMonthLabel = document.getElementById('current-month');
 const prevMonthBtn = document.getElementById('prev-month');
 const nextMonthBtn = document.getElementById('next-month');
 
-// Timer State
-let timerInterval = null;
-let remainingSeconds = 50 * 60; // Start with focus time
-let currentPhase = 'focus'; // 'focus' or 'break'
-let isRunning = false;
-let sessionStartTime = null;
-
 // Calendar State
 let currentCalendarDate = new Date();
-
-// Constants
-const FOCUS_DURATION = 50 * 60; // 50 minutes
-const BREAK_DURATION = 10 * 60; // 10 minutes
 
 // Progress Circle Setup
 const radius = 130;
@@ -46,14 +35,21 @@ const circumference = 2 * Math.PI * radius;
 progressCircle.style.strokeDasharray = `${circumference} ${circumference}`;
 progressCircle.style.strokeDashoffset = circumference;
 
+// Constants
+const FOCUS_DURATION = 50 * 60;
+const BREAK_DURATION = 10 * 60;
+
 // Initialize
 init();
 
 function init() {
+  loadTimerState();
   loadStats();
   renderCalendar();
-  updateDisplay();
   updateStatsPreview();
+  
+  // Poll for timer updates every second
+  setInterval(loadTimerState, 1000);
   
   // Event Listeners
   studyTab.addEventListener('click', () => switchMode('study'));
@@ -69,6 +65,44 @@ function init() {
   clearLogsBtn.addEventListener('click', clearAllLogs);
   prevMonthBtn.addEventListener('click', () => changeMonth(-1));
   nextMonthBtn.addEventListener('click', () => changeMonth(1));
+}
+
+// Load timer state from storage
+function loadTimerState() {
+  chrome.storage.local.get(['timerState'], (result) => {
+    if (result.timerState) {
+      const state = result.timerState;
+      
+      // Update UI
+      updateDisplay(state.remainingSeconds);
+      
+      // Update phase
+      if (state.currentPhase === 'focus') {
+        phaseLabel.textContent = 'Focus Session';
+        focusBtn.classList.add('active');
+        breakBtn.classList.remove('active');
+      } else {
+        phaseLabel.textContent = 'Break Time';
+        focusBtn.classList.remove('active');
+        breakBtn.classList.add('active');
+      }
+      
+      // Update buttons
+      if (state.isRunning) {
+        startBtn.style.display = 'none';
+        pauseBtn.style.display = 'block';
+      } else {
+        startBtn.style.display = 'block';
+        pauseBtn.style.display = 'none';
+      }
+      
+      // Update progress
+      const totalSeconds = state.currentPhase === 'focus' ? FOCUS_DURATION : BREAK_DURATION;
+      const elapsed = totalSeconds - state.remainingSeconds;
+      const progress = (elapsed / totalSeconds) * 100;
+      setProgress(progress);
+    }
+  });
 }
 
 // Mode Switching
@@ -90,86 +124,103 @@ function switchMode(mode) {
 
 // Phase Switching
 function switchPhase(phase) {
-  if (isRunning) return; // Don't switch while timer is running
-  
-  currentPhase = phase;
-  
-  if (phase === 'focus') {
-    remainingSeconds = FOCUS_DURATION;
-    phaseLabel.textContent = 'Focus Session';
-    focusBtn.classList.add('active');
-    breakBtn.classList.remove('active');
-  } else {
-    remainingSeconds = BREAK_DURATION;
-    phaseLabel.textContent = 'Break Time';
-    focusBtn.classList.remove('active');
-    breakBtn.classList.add('active');
-  }
-  
-  updateDisplay();
-  setProgress(0);
+  chrome.storage.local.get(['timerState'], (result) => {
+    const state = result.timerState || {};
+    
+    if (state.isRunning) return; // Don't switch while running
+    
+    const newDuration = phase === 'focus' ? FOCUS_DURATION : BREAK_DURATION;
+    
+    chrome.storage.local.set({
+      timerState: {
+        isRunning: false,
+        remainingSeconds: newDuration,
+        currentPhase: phase,
+        endTime: null
+      }
+    }, () => {
+      loadTimerState();
+    });
+  });
 }
 
 // Timer Functions
 function startTimer() {
-  if (isRunning) return;
-  
-  isRunning = true;
-  sessionStartTime = Date.now();
-  startBtn.style.display = 'none';
-  pauseBtn.style.display = 'block';
-  
-  timerInterval = setInterval(() => {
-    if (remainingSeconds > 0) {
-      remainingSeconds--;
-      updateDisplay();
+  chrome.storage.local.get(['timerState'], (result) => {
+    const state = result.timerState;
+    
+    const endTime = Date.now() + (state.remainingSeconds * 1000);
+    
+    chrome.storage.local.set({
+      timerState: {
+        ...state,
+        isRunning: true,
+        endTime: endTime
+      }
+    }, () => {
+      // Create alarm for timer completion
+      chrome.alarms.create('focus-timer', {
+        when: endTime
+      });
       
-      const totalSeconds = currentPhase === 'focus' ? FOCUS_DURATION : BREAK_DURATION;
-      const elapsed = totalSeconds - remainingSeconds;
-      const progress = (elapsed / totalSeconds) * 100;
-      setProgress(progress);
-    } else {
-      completeSession();
-    }
-  }, 1000);
+      // Create alarm for ticking every second
+      chrome.alarms.create('timer-tick', {
+        periodInMinutes: 1/60 // Every second
+      });
+      
+      loadTimerState();
+    });
+  });
 }
 
 function pauseTimer() {
-  if (!isRunning) return;
-  
-  clearInterval(timerInterval);
-  isRunning = false;
-  startBtn.style.display = 'block';
-  pauseBtn.style.display = 'none';
+  chrome.storage.local.get(['timerState'], (result) => {
+    const state = result.timerState;
+    
+    // Clear alarms
+    chrome.alarms.clear('focus-timer');
+    chrome.alarms.clear('timer-tick');
+    
+    chrome.storage.local.set({
+      timerState: {
+        ...state,
+        isRunning: false,
+        endTime: null
+      }
+    }, () => {
+      loadTimerState();
+    });
+  });
 }
 
 function resetTimer() {
-  pauseTimer();
-  remainingSeconds = currentPhase === 'focus' ? FOCUS_DURATION : BREAK_DURATION;
-  updateDisplay();
-  setProgress(0);
+  chrome.storage.local.get(['timerState'], (result) => {
+    const state = result.timerState;
+    
+    // Clear alarms
+    chrome.alarms.clear('focus-timer');
+    chrome.alarms.clear('timer-tick');
+    
+    const newDuration = state.currentPhase === 'focus' ? FOCUS_DURATION : BREAK_DURATION;
+    
+    chrome.storage.local.set({
+      timerState: {
+        isRunning: false,
+        remainingSeconds: newDuration,
+        currentPhase: state.currentPhase,
+        endTime: null
+      }
+    }, () => {
+      loadTimerState();
+      setProgress(0);
+    });
+  });
 }
 
-function completeSession() {
-  pauseTimer();
-  playNotificationSound();
-  showNotification();
-  
-  // Save session if it was a focus session
-  if (currentPhase === 'focus') {
-    saveSession();
-  }
-  
-  // Reset timer
-  remainingSeconds = currentPhase === 'focus' ? FOCUS_DURATION : BREAK_DURATION;
-  updateDisplay();
-  setProgress(0);
-}
-
-function updateDisplay() {
-  const minutes = Math.floor(remainingSeconds / 60);
-  const seconds = remainingSeconds % 60;
-  timeDisplay.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+function updateDisplay(seconds) {
+  const minutes = Math.floor(seconds / 60);
+  const secs = seconds % 60;
+  timeDisplay.textContent = `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
 function setProgress(percentage) {
@@ -177,65 +228,7 @@ function setProgress(percentage) {
   progressCircle.style.strokeDashoffset = offset;
 }
 
-// Notification Functions
-function showNotification() {
-  const title = currentPhase === 'focus' ? 'Focus Session Complete!' : 'Break Time Over!';
-  const message = currentPhase === 'focus' 
-    ? 'Great work! Time for a break.' 
-    : 'Back to focus mode!';
-  
-  chrome.notifications.create({
-    type: 'basic',
-    iconUrl: 'icons/icon128.png',
-    title: title,
-    message: message,
-    priority: 2
-  });
-}
-
-function playNotificationSound() {
-  const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-  
-  // Create two quick "tick" sounds
-  for (let i = 0; i < 2; i++) {
-    setTimeout(() => {
-      const oscillator = audioContext.createOscillator();
-      const gainNode = audioContext.createGain();
-      
-      oscillator.connect(gainNode);
-      gainNode.connect(audioContext.destination);
-      
-      oscillator.frequency.value = 800;
-      oscillator.type = 'sine';
-      
-      gainNode.gain.setValueAtTime(0.2, audioContext.currentTime);
-      gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.15);
-      
-      oscillator.start(audioContext.currentTime);
-      oscillator.stop(audioContext.currentTime + 0.15);
-    }, i * 200); // 200ms between ticks
-  }
-}
-
 // Storage Functions
-function saveSession() {
-  chrome.storage.local.get(['sessions'], (result) => {
-    const sessions = result.sessions || [];
-    const today = new Date().toISOString().split('T')[0];
-    
-    sessions.push({
-      date: today,
-      timestamp: Date.now(),
-      duration: FOCUS_DURATION,
-      phase: 'focus'
-    });
-    
-    chrome.storage.local.set({ sessions }, () => {
-      updateStatsPreview();
-    });
-  });
-}
-
 function loadStats() {
   chrome.storage.local.get(['sessions'], (result) => {
     const sessions = result.sessions || [];
@@ -415,3 +408,13 @@ function formatDate(dateStr) {
   const options = { month: 'short', day: 'numeric', year: 'numeric' };
   return date.toLocaleDateString('en-US', options);
 }
+
+// Listen for storage changes to refresh stats
+chrome.storage.onChanged.addListener((changes, namespace) => {
+  if (changes.sessions) {
+    updateStatsPreview();
+  }
+  if (changes.timerState) {
+    loadTimerState();
+  }
+});
